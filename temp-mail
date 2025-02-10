@@ -1,0 +1,205 @@
+#!/bin/bash
+
+BASE_URL="https://api.mail.tm"
+TOKEN=""
+
+GREEN='\033[0;32m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+echo -e "${GREEN}${BOLD}Temp-mail v1.0 by cicada${NC}\n"
+
+generate_random_name() {
+    # echo "Получаем случайное имя..." >&2
+    RESPONSE=$(curl -s "https://randomuser.me/api/?nat=us")
+    
+    # echo "API ответ: $RESPONSE" >&2
+    
+    if [[ $? -ne 0 || -z "$RESPONSE" ]]; then
+        # echo "Ошибка при обращении к API randomuser.me" >&2
+        echo $(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 10)
+        return 0
+    fi
+    
+    FIRST_NAME=$(echo "$RESPONSE" | grep -o '"first":"[^"]*' | cut -d '"' -f 4 | tr '[:upper:]' '[:lower:]')
+    LAST_NAME=$(echo "$RESPONSE" | grep -o '"last":"[^"]*' | cut -d '"' -f 4 | tr '[:upper:]' '[:lower:]')
+    
+    if [[ -z "$FIRST_NAME" || -z "$LAST_NAME" ]]; then
+        # echo "Не удалось получить имя, использую случайную строку" >&2
+        echo $(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 10)
+        return 0
+    fi
+    
+    # echo "Получены имя: $FIRST_NAME, фамилия: $LAST_NAME" >&2
+    RANDOM_NUM=$(( RANDOM % 900 + 100 ))
+    echo "${FIRST_NAME}${LAST_NAME}${RANDOM_NUM}"
+}
+
+get_valid_domain() {
+    echo "Получаем список доступных доменов..."
+    DOMAIN_JSON=$(curl -s "$BASE_URL/domains")
+    DOMAIN=$(echo "$DOMAIN_JSON" | grep -o '"domain":"[^"]*' | cut -d '"' -f 4 | head -n 1)
+
+    if [[ -z "$DOMAIN" ]]; then
+        echo "Ошибка: не удалось получить список доменов!"
+        exit 1
+    fi
+
+    echo -e "Используем домен: ${GREEN}${DOMAIN}${NC}"
+}
+
+EMAIL_PREFIX=$(generate_random_name)
+PASSWORD="password123"
+
+create_account() {
+    EMAIL="$EMAIL_PREFIX@$DOMAIN"
+    echo -e "Создаём временную почту: ${GREEN}${EMAIL}${NC}"
+
+    local JSON_DATA='{
+        "address": "'$EMAIL'",
+        "password": "'$PASSWORD'"
+    }'
+
+    # echo "Отправляем данные: $JSON_DATA" >&2
+    RESPONSE=$(curl -s -X POST "$BASE_URL/accounts" \
+        -H "Content-Type: application/json" \
+        -d "$JSON_DATA")
+
+    # echo "Ответ создания аккаунта: $RESPONSE" >&2
+
+    if echo "$RESPONSE" | grep -q "already used"; then
+        # echo "Этот адрес уже занят, генерируем новый..."
+        EMAIL_PREFIX=$(generate_random_name)
+        create_account
+        return
+    fi
+
+    if echo "$RESPONSE" | grep -q '"id"'; then
+        echo "Почта успешно создана!"
+        # echo "Ожидаем активации аккаунта..."
+        sleep 5
+    else
+        # echo "Ошибка создания почты: $RESPONSE"
+        echo "Пробуем создать новый аккаунт..."
+        EMAIL_PREFIX=$(generate_random_name)
+        create_account
+        return
+    fi
+}
+
+get_token() {
+    echo "Авторизуемся..."
+    local RESPONSE
+    local JSON_DATA='{
+        "address": "'$EMAIL'",
+        "password": "'$PASSWORD'"
+    }'
+
+    # echo "Данные авторизации: $JSON_DATA" >&2
+    RESPONSE=$(curl -s -X POST "$BASE_URL/token" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -d "$JSON_DATA")
+
+    # echo "Ответ авторизации: $RESPONSE" >&2
+    local NEW_TOKEN
+    NEW_TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*' | cut -d '"' -f 4)
+
+    if [[ -z "$NEW_TOKEN" ]]; then
+        # echo "Ошибка авторизации: $RESPONSE"
+        sleep 3
+        RESPONSE=$(curl -s -X POST "$BASE_URL/token" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "$JSON_DATA")
+        
+        NEW_TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*' | cut -d '"' -f 4)
+        if [[ -z "$NEW_TOKEN" ]]; then
+            # echo "Повторная ошибка авторизации: $RESPONSE"
+            exit 1
+        fi
+    fi
+
+    TOKEN="$NEW_TOKEN"
+    # echo "Токен успешно обновлен" >&2
+}
+
+SEEN_MESSAGES_FILE="/tmp/seen_messages.txt"
+> "$SEEN_MESSAGES_FILE"
+
+wait_for_messages() {
+    local dots=""
+    local count=0
+    printf "Ожидаем входящие письма"
+    
+    while true; do
+        if [[ -z "$TOKEN" ]]; then
+            get_token
+            continue
+        fi
+
+        RESPONSE=$(curl -s -X GET "$BASE_URL/messages" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/json")
+        
+        if [[ "$RESPONSE" == *"Unauthorized"* || "$RESPONSE" == *"401"* ]]; then
+            get_token
+            continue
+        fi
+        
+        MESSAGE_IDS=$(echo "$RESPONSE" | grep -o '"id":"[^"]*' | cut -d '"' -f 4)
+
+        printf "\rОжидаем входящие письма%s   \r" "$dots"
+        if [ $count -eq 3 ]; then
+            dots=""
+            count=0
+        else
+            dots="${dots}."
+            count=$((count + 1))
+        fi
+
+        for MESSAGE_ID in $MESSAGE_IDS; do
+            if ! grep -q "$MESSAGE_ID" "$SEEN_MESSAGES_FILE"; then
+                echo "$MESSAGE_ID" >> "$SEEN_MESSAGES_FILE"
+                printf "\r\033[K"
+                get_message_content "$MESSAGE_ID"
+                printf "Ожидаем входящие письма"
+                dots=""
+                count=0
+            fi
+        done
+
+        sleep 1
+    done
+}
+
+get_message_content() {
+    MESSAGE_ID=$1
+    RESPONSE=$(curl -s -X GET "$BASE_URL/messages/$MESSAGE_ID" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Accept: application/json")
+
+    if [[ "$RESPONSE" == *"Unauthorized"* || "$RESPONSE" == *"401"* ]]; then
+        get_token
+        RESPONSE=$(curl -s -X GET "$BASE_URL/messages/$MESSAGE_ID" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/json")
+    fi
+
+    SUBJECT=$(echo "$RESPONSE" | grep -o '"subject":"[^"]*' | cut -d '"' -f 4 | python3 -c "import sys; import json; print(json.loads('\"' + sys.stdin.read().strip() + '\"'))")
+    BODY=$(echo "$RESPONSE" | grep -o '"text":"[^"]*' | cut -d '"' -f 4 | python3 -c "import sys; import json; print(json.loads('\"' + sys.stdin.read().strip() + '\"'))")
+
+    if [[ -z "$SUBJECT" || -z "$BODY" ]]; then
+        return
+    fi
+
+    echo -e "\n${GREEN}---- Тема: $SUBJECT ----${NC}"
+    echo -e "$BODY"
+}
+
+get_valid_domain
+
+create_account
+get_token
+
+wait_for_messages
