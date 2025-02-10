@@ -18,18 +18,13 @@ install_with_brew() {
 
 # Функция для установки через другие пакетные менеджеры
 install_with_other() {
-    if [ "$EUID" -ne 0 ]; then 
-        echo -e "${RED}Для установки требуются права суперпользователя${NC}"
-        exit 1
-    fi
-    
     if command -v apt-get &> /dev/null; then
-        apt-get update
-        apt-get install -y python3 curl
+        sudo apt-get update
+        sudo apt-get install -y python3 curl
     elif command -v yum &> /dev/null; then
-        yum install -y python3 curl
+        sudo yum install -y python3 curl
     elif command -v pacman &> /dev/null; then
-        pacman -Sy python curl
+        sudo pacman -Sy python curl
     else
         echo -e "${RED}Не удалось определить пакетный менеджер${NC}"
         exit 1
