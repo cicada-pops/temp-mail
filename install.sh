@@ -26,7 +26,7 @@ else
 fi
 
 echo "Скачиваем Temp-mail..."
-curl -s -L https://github.com/cicada-pops/temp-mail/temp-mail -o /usr/local/bin/temp-mail
+curl -s -L https://raw.githubusercontent.com/cicada-pops/temp-mail/main/temp-mail -o /usr/local/bin/temp-mail
 chmod +x /usr/local/bin/temp-mail
 
 echo -e "\n${GREEN}Temp-mail успешно установлен!${NC}"
